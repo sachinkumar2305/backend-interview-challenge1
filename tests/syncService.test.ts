@@ -100,9 +100,33 @@ describe('SyncService', () => {
 
   describe('conflict resolution', () => {
     it('should resolve conflicts using last-write-wins', async () => {
-      // This test would verify that when there's a conflict,
-      // the task with the more recent updated_at timestamp wins
-      // Implementation depends on the actual conflict resolution logic
+      const task = await taskService.createTask({ title: 'Original Task' });
+      
+      // Mock server having a newer version
+      const serverTask = {
+        ...task,
+        title: 'Server Update',
+        updated_at: new Date(Date.now() + 1000), // Server version is newer
+      };
+
+      // Mock a batch sync response with conflict
+      vi.mocked(axios.post).mockResolvedValueOnce({
+        data: {
+          processed_items: [{
+            client_id: task.id,
+            server_id: 'srv_1',
+            status: 'conflict',
+            resolved_data: serverTask,
+          }],
+        },
+      });
+
+      const result = await syncService.sync();
+      expect(result.success).toBe(true);
+
+      // Verify that server version won (newer timestamp)
+      const resolvedTask = await taskService.getTask(task.id);
+      expect(resolvedTask?.title).toBe('Server Update');
     });
   });
 });

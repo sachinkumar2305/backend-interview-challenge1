@@ -65,15 +65,58 @@ describe('Integration Tests', () => {
         description: 'Task on multiple devices',
       });
 
-      // Simulate server having a different version
-      // Update locally
-      await taskService.updateTask(task.id, {
-        title: 'Local Update',
-        completed: true,
-      });
+      // Set it as previously synced
+      await db.run(
+        `UPDATE tasks 
+         SET sync_status = ?, server_id = ?, last_synced_at = ?
+         WHERE id = ?`,
+        ['synced', 'srv_1', new Date().toISOString(), task.id]
+      );
 
-      // When sync happens, conflict resolution should apply
-      // The task with more recent updated_at should win
+      // Simulate device going offline
+      await db.run(
+        `UPDATE tasks
+         SET title = ?, updated_at = ?, sync_status = ?
+         WHERE id = ?`,
+        [
+          'Local Update',
+          new Date(Date.now() - 1000).toISOString(), // Local update is older
+          'pending',
+          task.id,
+        ]
+      );
+
+      // Add update to sync queue
+      await db.run(
+        `INSERT INTO sync_queue (id, task_id, operation, data, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          'sync_1',
+          task.id,
+          'update',
+          JSON.stringify({
+            ...task,
+            title: 'Local Update',
+            updated_at: new Date(Date.now() - 1000),
+          }),
+          new Date().toISOString(),
+        ]
+      );
+
+      // When sync happens with server having newer version
+      // Conflict resolution should keep server version
+      const syncResult = await syncService.sync();
+      expect(syncResult.success).toBe(true);
+
+      // Check if conflict was detected and resolved
+      const resolvedTask = await taskService.getTask(task.id);
+      expect(resolvedTask).toBeDefined();
+      expect(resolvedTask?.title).toBe('Server Update'); // Server update wins
+      expect(resolvedTask?.sync_status).toBe('synced');
+
+      // Verify sync queue is cleared
+      const remainingQueue = await db.all('SELECT * FROM sync_queue WHERE task_id = ?', [task.id]);
+      expect(remainingQueue.length).toBe(0);
     });
   });
 
@@ -84,10 +127,42 @@ describe('Integration Tests', () => {
         title: 'Task to Sync',
       });
 
-      // Simulate first sync attempt failure
-      // Verify retry count increases
-      // Verify task remains in pending state
+      // Get initial sync queue item
+      const initialQueueItem = await db.get(
+        'SELECT * FROM sync_queue WHERE task_id = ?',
+        [task.id]
+      );
+      expect(initialQueueItem.retry_count).toBe(0);
+
+      // Trigger a sync (will be mocked to fail)
+      const firstSyncResult = await syncService.sync();
+      expect(firstSyncResult.success).toBe(false);
+
+      // Check retry count increased
+      const afterFailureQueueItem = await db.get(
+        'SELECT * FROM sync_queue WHERE task_id = ?',
+        [task.id]
+      );
+      expect(afterFailureQueueItem.retry_count).toBe(1);
+
+      // Check task still needs sync
+      const taskAfterFailure = await taskService.getTask(task.id);
+      expect(taskAfterFailure?.sync_status).toBe('pending');
+
       // Simulate successful retry
+      const secondSyncResult = await syncService.sync();
+      expect(secondSyncResult.success).toBe(true);
+
+      // Verify task was successfully synced
+      const taskAfterSuccess = await taskService.getTask(task.id);
+      expect(taskAfterSuccess?.sync_status).toBe('synced');
+
+      // Verify item was removed from sync queue
+      const finalQueueItem = await db.get(
+        'SELECT * FROM sync_queue WHERE task_id = ?',
+        [task.id]
+      );
+      expect(finalQueueItem).toBeNull();
     });
   });
 });

@@ -1,6 +1,55 @@
 # Backend Interview Challenge - Task Sync API
 
-This is a backend developer interview challenge focused on building a sync-enabled task management API. The challenge evaluates understanding of REST APIs, data synchronization, offline-first architecture, and conflict resolution.
+This is a backend developer interview challenge focused on building a sync-enabled task management API. The solution provides a robust implementation of task management with offline support, data synchronization, and conflict resolution.
+
+## Implementation Details
+
+### Architecture Overview
+
+The solution implements a comprehensive offline-first task management system with:
+
+1. **SQLite Database Layer**
+   - In-memory or file-based storage
+   - Tables for tasks and sync queue
+   - Transaction support for data integrity
+
+2. **Task Service (`taskService.ts`)**
+   - Complete CRUD operations
+   - Automatic sync queue updates
+   - Soft delete functionality
+
+3. **Sync Service (`syncService.ts`)**
+   - Timestamp-based conflict resolution
+   - Batch processing with configurable size
+   - Retry mechanism with exponential backoff
+   - Queue management and error handling
+
+4. **REST API Endpoints**
+   - Standard CRUD operations for tasks
+   - Sync trigger and status endpoints
+   - Health check endpoint
+   - Proper error responses
+
+### Sync and Conflict Resolution
+
+The sync mechanism works as follows:
+
+1. **Offline Operations**
+   - All CRUD operations are stored locally first
+   - Changes are queued in the sync queue table
+   - Each operation tracks retry attempts and errors
+
+2. **Sync Process**
+   - When online, sync is triggered automatically or manually
+   - Changes are sent in batches (configurable size)
+   - Last-write-wins conflict resolution based on timestamps
+   - Failed operations are retried up to 3 times
+
+3. **Conflict Resolution**
+   - Conflicts are detected by comparing timestamps
+   - Server version wins if timestamps match
+   - All conflict resolutions are logged for auditing
+   - Clients receive resolved state in sync response
 
 ## 📚 Documentation Overview
 
@@ -45,18 +94,85 @@ backend-interview-challenge/
 - npm or yarn
 
 ### Setup
-1. Clone the repository
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/PearlThoughts/backend-interview-challenge.git
+   cd backend-interview-challenge
+   ```
+
 2. Install dependencies:
    ```bash
    npm install
    ```
+
 3. Copy environment variables:
    ```bash
    cp .env.example .env
    ```
-4. Run the development server:
+
+4. Configure environment variables:
+   ```env
+   PORT=3000
+   SYNC_BATCH_SIZE=50
+   DB_PATH=:memory:  # Use :memory: for in-memory SQLite or provide a file path
+   ```
+
+5. Run the development server:
    ```bash
    npm run dev
+   ```
+
+### Testing the API
+
+1. **Create a Task**
+   ```bash
+   curl -X POST http://localhost:3000/api/tasks \
+     -H "Content-Type: application/json" \
+     -d '{"title": "Test Task", "description": "This is a test task"}'
+   ```
+
+2. **Get All Tasks**
+   ```bash
+   curl http://localhost:3000/api/tasks
+   ```
+
+3. **Update a Task**
+   ```bash
+   curl -X PUT http://localhost:3000/api/tasks/{taskId} \
+     -H "Content-Type: application/json" \
+     -d '{"completed": true}'
+   ```
+
+4. **Delete a Task**
+   ```bash
+   curl -X DELETE http://localhost:3000/api/tasks/{taskId}
+   ```
+
+5. **Trigger Sync**
+   ```bash
+   curl -X POST http://localhost:3000/api/sync
+   ```
+
+6. **Check Sync Status**
+   ```bash
+   curl http://localhost:3000/api/status
+   ```
+
+### Running Tests
+
+1. **Full Test Suite**
+   ```bash
+   npm test
+   ```
+
+2. **Watch Mode (Development)**
+   ```bash
+   npm run test:watch
+   ```
+
+3. **Test Coverage**
+   ```bash
+   npm run test:coverage
    ```
 
 ### Available Scripts

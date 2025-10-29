@@ -8,11 +8,28 @@ export class Database {
   private db: sqlite3.Database;
 
   constructor(filename: string = ':memory:') {
-    this.db = new sqlite.Database(filename);
+    try {
+      this.db = new sqlite.Database(filename, (err) => {
+        if (err) {
+          console.error('Error opening database:', err);
+          throw err;
+        }
+        console.log('Connected to SQLite database');
+      });
+    } catch (error) {
+      console.error('Failed to create database:', error);
+      throw error;
+    }
   }
 
   async initialize(): Promise<void> {
-    await this.createTables();
+    try {
+      await this.createTables();
+      console.log('Database tables created successfully');
+    } catch (error) {
+      console.error('Failed to initialize database:', error);
+      throw error;
+    }
   }
 
   private async createTables(): Promise<void> {

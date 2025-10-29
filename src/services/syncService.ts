@@ -15,56 +15,207 @@ export class SyncService {
   }
 
   async sync(): Promise<SyncResult> {
-    // TODO: Main sync orchestration method
-    // 1. Get all items from sync queue
-    // 2. Group items by batch (use SYNC_BATCH_SIZE from env)
-    // 3. Process each batch
-    // 4. Handle success/failure for each item
-    // 5. Update sync status in database
-    // 6. Return sync result summary
-    throw new Error('Not implemented');
+    const isOnline = await this.checkConnectivity();
+    if (!isOnline) {
+      return {
+        success: false,
+        synced_items: 0,
+        failed_items: 0,
+        errors: [{
+          task_id: '',
+          operation: 'sync',
+          error: 'Server is not reachable',
+          timestamp: new Date()
+        }]
+      };
+    }
+
+    const syncQueueItems = await this.db.all(
+      `SELECT * FROM sync_queue WHERE retry_count < 3 ORDER BY created_at ASC`
+    );
+
+    if (syncQueueItems.length === 0) {
+      return {
+        success: true,
+        synced_items: 0,
+        failed_items: 0,
+        errors: []
+      };
+    }
+
+    const BATCH_SIZE = parseInt(process.env.SYNC_BATCH_SIZE || '50');
+    const batches = [];
+    for (let i = 0; i < syncQueueItems.length; i += BATCH_SIZE) {
+      batches.push(syncQueueItems.slice(i, i + BATCH_SIZE));
+    }
+
+    let syncedItems = 0;
+    let failedItems = 0;
+    const errors: Array<{task_id: string, operation: string, error: string, timestamp: Date}> = [];
+
+    for (const batch of batches) {
+      try {
+        const batchResponse = await this.processBatch(batch);
+        for (const item of batchResponse.processed_items) {
+          if (item.status === 'success') {
+            await this.updateSyncStatus(item.client_id, 'synced', item.resolved_data);
+            syncedItems++;
+          } else {
+            await this.handleSyncError(batch.find(b => b.task_id === item.client_id)!, new Error(item.error || 'Sync failed'));
+            failedItems++;
+            errors.push({
+              task_id: item.client_id,
+              operation: batch.find(b => b.task_id === item.client_id)?.operation || 'unknown',
+              error: item.error || 'Sync failed',
+              timestamp: new Date()
+            });
+          }
+        }
+      } catch (error) {
+        for (const item of batch) {
+          await this.handleSyncError(item, error as Error);
+          failedItems++;
+          errors.push({
+            task_id: item.task_id,
+            operation: item.operation,
+            error: (error as Error).message,
+            timestamp: new Date()
+          });
+        }
+      }
+    }
+
+    return {
+      success: failedItems === 0,
+      synced_items: syncedItems,
+      failed_items: failedItems,
+      errors
+    };
   }
 
   async addToSyncQueue(taskId: string, operation: 'create' | 'update' | 'delete', data: Partial<Task>): Promise<void> {
-    // TODO: Add operation to sync queue
-    // 1. Create sync queue item
-    // 2. Store serialized task data
-    // 3. Insert into sync_queue table
-    throw new Error('Not implemented');
+    const syncItem: SyncQueueItem = {
+      id: Math.random().toString(36).substring(2, 15),
+      task_id: taskId,
+      operation,
+      data,
+      created_at: new Date(),
+      retry_count: 0
+    };
+
+    await this.db.run(
+      `INSERT INTO sync_queue (id, task_id, operation, data, created_at, retry_count)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        syncItem.id,
+        syncItem.task_id,
+        syncItem.operation,
+        JSON.stringify(syncItem.data),
+        syncItem.created_at.toISOString(),
+        syncItem.retry_count
+      ]
+    );
   }
 
   private async processBatch(items: SyncQueueItem[]): Promise<BatchSyncResponse> {
-    // TODO: Process a batch of sync items
-    // 1. Prepare batch request
-    // 2. Send to server
-    // 3. Handle response
-    // 4. Apply conflict resolution if needed
-    throw new Error('Not implemented');
+    const batchRequest: BatchSyncRequest = {
+      items: items.map(item => ({
+        ...item,
+        data: typeof item.data === 'string' ? JSON.parse(item.data) : item.data
+      })),
+      client_timestamp: new Date()
+    };
+
+    const response = await axios.post<BatchSyncResponse>(
+      `${this.apiUrl}/sync/batch`,
+      batchRequest,
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000
+      }
+    );
+
+    const processedItems = response.data.processed_items;
+    for (const item of processedItems) {
+      if (item.status === 'conflict') {
+        const localTask = await this.taskService.getTask(item.client_id);
+        if (localTask && item.resolved_data) {
+          item.resolved_data = await this.resolveConflict(localTask, item.resolved_data as Task);
+          item.status = 'success';
+        }
+      }
+    }
+
+    return {
+      processed_items: processedItems
+    };
   }
 
   private async resolveConflict(localTask: Task, serverTask: Task): Promise<Task> {
-    // TODO: Implement last-write-wins conflict resolution
-    // 1. Compare updated_at timestamps
-    // 2. Return the more recent version
-    // 3. Log conflict resolution decision
-    throw new Error('Not implemented');
+    // Implement last-write-wins conflict resolution
+    const localTimestamp = localTask.updated_at.getTime();
+    const serverTimestamp = serverTask.updated_at.getTime();
+
+    const winningTask = localTimestamp > serverTimestamp ? localTask : serverTask;
+    console.log(`Conflict resolved for task ${localTask.id}: ${localTimestamp > serverTimestamp ? 'local' : 'server'} version won`);
+    
+    return winningTask;
   }
 
   private async updateSyncStatus(taskId: string, status: 'synced' | 'error', serverData?: Partial<Task>): Promise<void> {
-    // TODO: Update task sync status
-    // 1. Update sync_status field
-    // 2. Update server_id if provided
-    // 3. Update last_synced_at timestamp
-    // 4. Remove from sync queue if successful
-    throw new Error('Not implemented');
+    const updateFields = [
+      `sync_status = ?`,
+      `last_synced_at = ?`
+    ];
+    const params = [status, new Date().toISOString()];
+
+    if (serverData?.server_id) {
+      updateFields.push('server_id = ?');
+      params.push(serverData.server_id);
+    }
+
+    // Update task sync status
+    await this.db.run(
+      `UPDATE tasks SET ${updateFields.join(', ')} WHERE id = ?`,
+      [...params, taskId]
+    );
+
+    // Remove from sync queue if synced successfully
+    if (status === 'synced') {
+      await this.db.run(
+        `DELETE FROM sync_queue WHERE task_id = ?`,
+        [taskId]
+      );
+    }
   }
 
   private async handleSyncError(item: SyncQueueItem, error: Error): Promise<void> {
-    // TODO: Handle sync errors
-    // 1. Increment retry count
-    // 2. Store error message
-    // 3. If retry count exceeds limit, mark as permanent failure
-    throw new Error('Not implemented');
+    const retryCount = item.retry_count + 1;
+    const errorMessage = error.message || 'Unknown error';
+
+    // Update sync queue item
+    await this.db.run(
+      `UPDATE sync_queue 
+       SET retry_count = ?, error_message = ?
+       WHERE id = ?`,
+      [retryCount, errorMessage, item.id]
+    );
+
+    // If retry count exceeds limit, mark task as permanent failure
+    if (retryCount >= 3) {
+      await this.db.run(
+        `UPDATE tasks 
+         SET sync_status = ?, error_message = ?
+         WHERE id = ?`,
+        ['error', `Max retries exceeded: ${errorMessage}`, item.task_id]
+      );
+
+      // Remove from sync queue
+      await this.db.run(
+        `DELETE FROM sync_queue WHERE id = ?`,
+        [item.id]
+      );
+    }
   }
 
   async checkConnectivity(): Promise<boolean> {

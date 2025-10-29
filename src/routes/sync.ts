@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { SyncService } from '../services/syncService';
 import { TaskService } from '../services/taskService';
 import { Database } from '../db/database';
+import { validateSyncBatch } from '../middleware/validation';
 
 export function createSyncRouter(db: Database): Router {
   const router = Router();
@@ -10,29 +11,110 @@ export function createSyncRouter(db: Database): Router {
 
   // Trigger manual sync
   router.post('/sync', async (req: Request, res: Response) => {
-    // TODO: Implement sync endpoint
-    // 1. Check connectivity first
-    // 2. Call syncService.sync()
-    // 3. Return sync result
-    res.status(501).json({ error: 'Not implemented' });
+    try {
+      const isOnline = await syncService.checkConnectivity();
+      if (!isOnline) {
+        return res.status(503).json({
+          error: 'Service unavailable - offline mode',
+          timestamp: new Date(),
+          path: req.path
+        });
+      }
+
+      const syncResult = await syncService.sync();
+      res.json(syncResult);
+    } catch (error) {
+      res.status(500).json({
+        error: 'Sync operation failed',
+        timestamp: new Date(),
+        path: req.path
+      });
+    }
   });
 
   // Check sync status
   router.get('/status', async (req: Request, res: Response) => {
-    // TODO: Implement sync status endpoint
-    // 1. Get pending sync count
-    // 2. Get last sync timestamp
-    // 3. Check connectivity
-    // 4. Return status summary
-    res.status(501).json({ error: 'Not implemented' });
+    try {
+      // Get pending sync queue items
+      const pendingItems = await db.all(
+        `SELECT COUNT(*) as count FROM sync_queue`
+      );
+      
+      // Get latest sync timestamp
+      const lastSyncData = await db.get(
+        `SELECT MAX(last_synced_at) as last_sync FROM tasks WHERE last_synced_at IS NOT NULL`
+      );
+
+      const isOnline = await syncService.checkConnectivity();
+
+      res.json({
+        pending_sync_count: pendingItems[0].count,
+        last_sync_timestamp: lastSyncData?.last_sync ? new Date(lastSyncData.last_sync) : null,
+        is_online: isOnline,
+        sync_queue_size: pendingItems[0].count
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: 'Failed to get sync status',
+        timestamp: new Date(),
+        path: req.path
+      });
+    }
   });
 
   // Batch sync endpoint (for server-side)
-  router.post('/batch', async (req: Request, res: Response) => {
-    // TODO: Implement batch sync endpoint
-    // This would be implemented on the server side
-    // to handle batch sync requests from clients
-    res.status(501).json({ error: 'Not implemented' });
+  router.post('/batch', validateSyncBatch, async (req: Request, res: Response) => {
+    try {
+      const { items, client_timestamp } = req.body;
+      if (!items || !Array.isArray(items)) {
+        return res.status(400).json({
+          error: 'Invalid request body - items array is required',
+          timestamp: new Date(),
+          path: req.path
+        });
+      }
+
+      // Process each item in the batch
+      const processedItems = await Promise.all(items.map(async (item) => {
+        try {
+          let resolvedData;
+          switch (item.operation) {
+            case 'create':
+              resolvedData = await taskService.createTask(item.data);
+              break;
+            case 'update':
+              resolvedData = await taskService.updateTask(item.task_id, item.data);
+              break;
+            case 'delete':
+              await taskService.deleteTask(item.task_id);
+              resolvedData = { id: item.task_id, is_deleted: true };
+              break;
+          }
+
+          return {
+            client_id: item.task_id,
+            server_id: resolvedData?.id || item.task_id,
+            status: 'success',
+            resolved_data: resolvedData
+          };
+        } catch (error) {
+          return {
+            client_id: item.task_id,
+            server_id: item.task_id,
+            status: 'error',
+            error: (error as Error).message
+          };
+        }
+      }));
+
+      res.json({ processed_items: processedItems });
+    } catch (error) {
+      res.status(500).json({
+        error: 'Failed to process batch sync',
+        timestamp: new Date(),
+        path: req.path
+      });
+    }
   });
 
   // Health check endpoint

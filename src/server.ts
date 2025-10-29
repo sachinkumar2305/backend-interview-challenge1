@@ -18,6 +18,11 @@ app.use(express.json());
 // Initialize database
 const db = new Database(process.env.DATABASE_URL || './data/tasks.sqlite3');
 
+// Basic test route
+app.get('/test', (req, res) => {
+  res.json({ message: 'Server is working' });
+});
+
 // Routes
 app.use('/api/tasks', createTaskRouter(db));
 app.use('/api', createSyncRouter(db));
@@ -25,18 +30,57 @@ app.use('/api', createSyncRouter(db));
 // Error handling
 app.use(errorHandler);
 
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    path: req.path,
+    timestamp: new Date()
+  });
+});
+
 // Start server
 async function start() {
   try {
+    // Initialize database
     await db.initialize();
     console.log('Database initialized');
     
-    app.listen(PORT, () => {
+    // Start the server
+    const server = app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
     });
+
+    // Handle server-specific errors
+    server.on('error', (error: Error) => {
+      console.error('Server error:', error);
+    });
+
+    // Global error handlers to prevent crashes
+    process.on('uncaughtException', (error) => {
+      console.error('Uncaught exception:', error);
+      // Don't exit, just log the error
+    });
+
+    process.on('unhandledRejection', (reason, promise) => {
+      console.error('Unhandled rejection at:', promise, 'reason:', reason);
+      // Don't exit, just log the error
+    });
+
+    // Cleanup on shutdown
+    process.on('SIGTERM', async () => {
+      console.log('SIGTERM received. Closing server gracefully...');
+      await db.close();
+      server.close(() => {
+        console.log('Server closed');
+        process.exit(0);
+      });
+    });
+
+    return server; // Return the server instance
   } catch (error) {
     console.error('Failed to start server:', error);
-    process.exit(1);
+    throw error; // Let nodemon handle the restart
   }
 }
 
